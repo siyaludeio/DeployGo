@@ -1,332 +1,164 @@
-# Self Deployer - Go Deployment Service
+# DeployGo 🚀
 
-A Linux service written in Go that handles deployment requests from PHP applications with zero downtime support.
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Go Version](https://img.shields.io/badge/go-1.21-cyan.svg)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos-lightgrey.svg)
 
-## Features
+**DeployGo** is a lightweight, high-performance command-line tool written in Go designed to bridge the gap between web applications (like Laravel/PHP) and system-level deployment tasks.
 
-- ✅ HTTP API endpoint for PHP integration
-- ✅ Path validation and permission checking
-- ✅ Asynchronous deployment processing
-- ✅ Real-time logging with timestamps
-- ✅ Non-blocking log files (readable by PHP with polling)
-- ✅ Zero downtime deployment support
-- ✅ Systemd service integration
+It solves the common "timeout" problem when triggering long-running deployment scripts from a web request or queue worker by spawning a completely detached background process.
 
-## Installation
 
-### 1. Build the Application
+
+## ✨ Key Features
+
+- **🔥 Fire & Forget**: Triggers deployment and immediately releases the calling process.
+- **🛡️ Secure Execution**: Strict absolute path validation to prevent traversal attacks.
+- **📝 Robust Logging**: Real-time logging with timestamps and auto-rotation (`deployment_TIMESTAMP.log`).
+- **⚡ Performance**: Zero overhead on your web server threads.
+- **🐧 Cross-Platform**: Native support for Linux (x64/ARM64) and macOS (Intel/Apple Silicon).
+
+## 🏗️ Architecture
+
+When you run `deploygo deploy ...`:
+
+1.  **Validation**: It verifies all paths check out.
+2.  **Spawn**: It launches a self-managed background process.
+3.  **Detach**: The CLI exits immediately (Exit Code 0), letting your PHP/Web process finish instantly.
+4.  **Execute**: The background process runs your script, streams logs to disk, and cleans up after itself.
+
+## 📦 Installation
+
+### Option 1: Build from Source (Recommended)
 
 ```bash
-go mod download
-go build -o self-deployer
+# Clone the repository
+git clone https://github.com/yourusername/deploy-go.git
+cd deploy-go
+
+# Build using the interactive script
+chmod +x build.sh
+./build.sh
 ```
 
-### 2. Install as System Service
+### Option 2: Quick Compile
 
 ```bash
-# Copy binary to /opt/deployer
-sudo mkdir -p /opt/deployer
-sudo cp self-deployer /opt/deployer/
-sudo chmod +x /opt/deployer/self-deployer
-
-# Copy service file
-sudo cp deployer.service /etc/systemd/system/
-
-# Create necessary directories
-sudo mkdir -p /tmp/deployer/queue
-sudo chown www-data:www-data /tmp/deployer/queue
-
-# Reload systemd and start service
-sudo systemctl daemon-reload
-sudo systemctl enable deployer.service
-sudo systemctl start deployer.service
-
-# Check status
-sudo systemctl status deployer.service
+go build -o deploygo main.go deployment.go
 ```
 
-### 3. Configure User/Group and Port
+### Global Installation
 
-Edit `/etc/systemd/system/deployer.service` and:
-- Change `User` and `Group` to match your web server user (commonly `www-data`, `nginx`, or `apache`)
-- Change `PORT` environment variable if you want to use a custom port (default: 8080)
+Move the binary to your path to use it anywhere:
 
-## Usage
+```bash
+sudo mv deploygo /usr/local/bin/
+sudo chmod +x /usr/local/bin/deploygo
+```
 
-### From PHP
+## 🚀 Usage
+
+### Basic Command
+
+```bash
+deploygo deploy \
+  --project="/var/www/my-app" \
+  --deployScript="/var/www/my-app/deploy.sh" \
+  --logPath="/var/www/my-app/logs"
+```
+
+### Running as Web User (Recommended)
+
+To ensure files created during deployment (caches, views) are owned by the correct user, run as `www-data`:
+
+```bash
+sudo -u www-data deploygo deploy \
+  --project="/var/www/my-app" \
+  --deployScript="/var/www/my-app/deploy.sh" \
+  --logPath="/var/www/my-app/logs"
+```
+
+## 🛠️ Integration Guide
+
+### Laravel / PHP Integration
+
+Stop hitting `max_execution_time` limits. Trigger deployments from your Artisan commands or Controllers.
+
+#### 1. Create the Command
 
 ```php
-<?php
-$data = [
-    'projectPath' => '/var/www/myproject',
-    'deploymentScriptPath' => '/var/www/myproject/deploy.sh',
-    'logPath' => '/var/www/myproject/deployment.log'
-];
+// app/Console/Commands/TriggerDeployment.php
 
-$ch = curl_init('http://localhost:8080/deploy');
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_POST, true);
-curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+namespace App\Console\Commands;
 
-$response = curl_exec($ch);
-$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-curl_close($ch);
+use Illuminate\Console\Command;
+use Symfony\Component\Process\Process;
 
-if ($httpCode === 200) {
-    $result = json_decode($response, true);
-    echo "Deployment queued: " . $result['taskId'];
-} else {
-    echo "Error: " . $response;
-}
-?>
-```
-
-### Example Deployment Script
-
-Create a deployment script (e.g., `deploy.sh`) in your project:
-
-```bash
-#!/bin/bash
-set -e
-
-echo "Starting deployment..."
-
-# Pull latest code
-git pull origin main
-
-# Install dependencies
-composer install --no-dev --optimize-autoloader
-npm install --production
-
-# Build assets
-npm run build
-
-# Run migrations
-php artisan migrate --force
-
-# Clear caches
-php artisan config:cache
-php artisan route:cache
-php artisan view:cache
-
-# Reload PHP-FPM for zero downtime
-sudo systemctl reload php8.1-fpm
-
-echo "Deployment completed successfully!"
-```
-
-Make sure the script is executable:
-```bash
-chmod +x deploy.sh
-```
-
-### Reading Logs from PHP (Livewire with Polling)
-
-```php
-<?php
-// In your Livewire component
-public function getLogs()
+class TriggerDeployment extends Command
 {
-    $logPath = '/var/www/myproject/deployment.log';
-    
-    if (file_exists($logPath)) {
-        // Read last 100 lines
-        $lines = file($logPath);
-        $recentLines = array_slice($lines, -100);
-        return implode('', $recentLines);
+    protected $signature = 'app:deploy';
+    protected $description = 'Trigger a background deployment';
+
+    public function handle()
+    {
+        $binary = '/usr/local/bin/deploygo';
+        
+        $command = [
+            $binary,
+            'deploy',
+            '--project=' . base_path(),
+            '--deployScript=' . base_path('deploy.sh'),
+            '--logPath=' . storage_path('logs'),
+        ];
+
+        // This runs instantly!
+        $process = new Process($command);
+        $process->run();
+
+        if (!$process->isSuccessful()) {
+            $this->error('Failed to start: ' . $process->getErrorOutput());
+            return 1;
+        }
+
+        $this->info('Deployment started in background! 🚀');
     }
-    
-    return 'No logs available';
 }
 ```
 
-In your Livewire view:
-```blade
-<div wire:poll.5s="getLogs">
-    <pre>{{ $this->getLogs() }}</pre>
-</div>
-```
+### Logs & Monitoring
 
-## API Endpoints
+Logs are automatically rotated. You can easily build a live log viewer in your dashboard by polling the active log file:
 
-### POST /deploy
+`storage/logs/deployment.log` (Active)
+`storage/logs/deployment_20240101_120000.log` (Rotated History)
 
-Deploy a project.
+## 🔒 Security
 
-**Request Body:**
-```json
-{
-    "projectPath": "/var/www/myproject",
-    "deploymentScriptPath": "/var/www/myproject/deploy.sh",
-    "logPath": "/var/www/myproject/deployment.log"
-}
-```
+- **Path Restriction**: The tool refuses to run if paths are not absolute.
+- **Permissions**: It inherits the permissions of the user running it. Always enforce least-privilege by running as `www-data` or a dedicated deployment user, never `root`.
 
-**Response:**
-```json
-{
-    "status": "queued",
-    "taskId": "1234567890123456789",
-    "message": "Deployment queued successfully"
-}
-```
+## 🤝 Contributing
 
-### GET /health
+1.  Fork the Project
+2.  Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
+3.  Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
+4.  Push to the Branch (`git push origin feature/AmazingFeature`)
+5.  Open a Pull Request
 
-Health check endpoint.
+## 🗺️ Roadmap
 
-**Response:**
-```
-OK
-```
+- [ ] Webhook support (Slack/Discord notifications on failure).
+- [ ] Configurable log retention policies.
+- [ ] Dry-run mode for script validation.
 
-## Zero Downtime Deployment
+## 📬 Author
 
-The service supports zero downtime deployments through:
+**Indunil Peramuna**
 
-1. **Symlink Switching**: Create a new deployment directory and switch symlinks
-2. **Service Reload**: Reload services (PHP-FPM, Nginx) without full restart
-3. **Health Checks**: Verify new deployment before switching
+- 🐙 GitHub: [@iperamuna](https://github.com/iperamuna)
+- 📧 Email: [indunil@siyalude.io](mailto:indunil@siyalude.io)
+- 💬 WhatsApp: [+94 77 767 1771](https://wa.me/94777671771)
 
-### Example Zero Downtime Script
+## 📄 License
 
-```bash
-#!/bin/bash
-set -e
-
-PROJECT_PATH="/var/www/myproject"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-NEW_DEPLOY="$PROJECT_PATH/.deployments/$TIMESTAMP"
-
-# Create new deployment directory
-mkdir -p "$NEW_DEPLOY"
-
-# Clone/copy project to new directory
-cp -r "$PROJECT_PATH/current"/* "$NEW_DEPLOY/"
-
-# Install dependencies in new directory
-cd "$NEW_DEPLOY"
-composer install --no-dev --optimize-autoloader
-
-# Run migrations
-php artisan migrate --force
-
-# Health check (customize as needed)
-curl -f http://localhost/health || exit 1
-
-# Switch symlink atomically
-ln -sfn "$NEW_DEPLOY" "$PROJECT_PATH/current"
-
-# Reload services
-sudo systemctl reload php8.1-fpm
-sudo systemctl reload nginx
-
-echo "Zero downtime deployment completed!"
-```
-
-## Configuration
-
-### Setting Custom Port
-
-The service runs on port **8080** by default, but you can configure a custom port using the `PORT` environment variable.
-
-#### Method 1: Systemd Service File (Recommended)
-
-Edit `/etc/systemd/system/deployer.service` and change the `PORT` environment variable:
-
-```ini
-# Environment variables
-Environment="PORT=9000"
-```
-
-Then reload and restart:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart deployer.service
-```
-
-#### Method 2: Command Line
-
-Run directly with custom port:
-```bash
-PORT=9000 ./self-deployer
-```
-
-#### Method 3: Export Environment Variable
-
-```bash
-export PORT=9000
-./self-deployer
-```
-
-#### Method 4: Using .env file (if using systemd)
-
-Create `/opt/deployer/.env` and update the service file to load it:
-```ini
-EnvironmentFile=/opt/deployer/.env
-```
-
-### Environment Variables
-
-- `PORT`: HTTP server port (default: 8080)
-
-### Directory Structure
-
-```
-/tmp/deployer/
-  └── queue/          # Temporary task files
-```
-
-## Logging
-
-Logs are written with timestamps in the format:
-```
-[2024-01-15 10:30:45] [STDOUT] Your deployment output here
-[2024-01-15 10:30:46] [STDERR] Any errors here
-```
-
-Log files are opened in append mode and flushed after each write, ensuring they're readable by PHP polling without file locking issues.
-
-## Troubleshooting
-
-### Service won't start
-
-```bash
-# Check logs
-sudo journalctl -u deployer.service -f
-
-# Check permissions
-ls -la /opt/deployer/
-ls -la /tmp/deployer/queue/
-```
-
-### Deployment not processing
-
-```bash
-# Check if file watcher is working
-ls -la /tmp/deployer/queue/
-
-# Check service logs
-sudo journalctl -u deployer.service -n 50
-```
-
-### Permission issues
-
-```bash
-# Ensure web server user can write to log directory
-sudo chown -R www-data:www-data /var/www/myproject
-sudo chmod 755 /var/www/myproject
-```
-
-## Security Considerations
-
-- The service runs as a system user (www-data) with limited privileges
-- Path validation ensures only absolute paths are accepted
-- Log directory must be writable before deployment is queued
-- Consider adding authentication/authorization for production use
-
-## License
-
-MIT
-
+Distributed under the MIT License. See `LICENSE` for more information.

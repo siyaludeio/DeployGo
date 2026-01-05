@@ -2,111 +2,50 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
-
-	"github.com/fsnotify/fsnotify"
 )
 
-func startFileWatcher() {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Fatalf("Failed to create file watcher: %v", err)
-	}
-	defer watcher.Close()
-
-	// Watch the queue directory
-	if err := watcher.Add(queueDir); err != nil {
-		log.Fatalf("Failed to watch queue directory: %v", err)
-	}
-
-	log.Printf("File watcher started, monitoring: %s", queueDir)
-
-	// Process existing files in queue
-	processExistingFiles()
-
-	// Watch for new files
-	for {
-		select {
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-			if event.Op&fsnotify.Create == fsnotify.Create {
-				if strings.HasPrefix(filepath.Base(event.Name), "task_") && strings.HasSuffix(event.Name, ".json") {
-					log.Printf("New deployment task detected: %s", event.Name)
-					// Small delay to ensure file is fully written
-					time.Sleep(100 * time.Millisecond)
-					go processDeploymentTask(event.Name)
-				}
-			}
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			log.Printf("File watcher error: %v", err)
-		}
-	}
+type DeploymentTask struct {
+	ProjectPath          string
+	DeploymentScriptPath string
+	LogPath              string
+	TaskID               string
+	CreatedAt            time.Time
 }
 
-func processExistingFiles() {
-	files, err := os.ReadDir(queueDir)
-	if err != nil {
-		log.Printf("Failed to read queue directory: %v", err)
-		return
+func ValidatePaths(project, script, logs string) error {
+	if !filepath.IsAbs(project) {
+		return fmt.Errorf("project path must be absolute")
+	}
+	if _, err := os.Stat(project); os.IsNotExist(err) {
+		return fmt.Errorf("project path does not exist")
 	}
 
-	for _, file := range files {
-		if strings.HasPrefix(file.Name(), "task_") && strings.HasSuffix(file.Name(), ".json") {
-			taskFile := filepath.Join(queueDir, file.Name())
-			go processDeploymentTask(taskFile)
-		}
+	if !filepath.IsAbs(script) {
+		return fmt.Errorf("deployment script path must be absolute")
 	}
+	if _, err := os.Stat(script); os.IsNotExist(err) {
+		return fmt.Errorf("deployment script path does not exist")
+	}
+
+	if !filepath.IsAbs(logs) {
+		return fmt.Errorf("log path must be absolute")
+	}
+	if _, err := os.Stat(logs); os.IsNotExist(err) {
+		return fmt.Errorf("log path does not exist")
+	}
+
+	return nil
 }
 
-func processDeploymentTask(taskFile string) {
-	// Read task file
-	data, err := os.ReadFile(taskFile)
-	if err != nil {
-		log.Printf("Failed to read task file %s: %v", taskFile, err)
-		return
-	}
-
-	var task DeploymentTask
-	if err := json.Unmarshal(data, &task); err != nil {
-		log.Printf("Failed to unmarshal task file %s: %v", taskFile, err)
-		return
-	}
-
-	log.Printf("Processing deployment task: %s", task.TaskID)
-
-	// Execute deployment
-	if err := executeDeployment(task); err != nil {
-		log.Printf("Deployment failed for task %s: %v", task.TaskID, err)
-		writeLog(task.LogPath, fmt.Sprintf("[ERROR] Deployment failed: %v", err))
-	} else {
-		log.Printf("Deployment completed successfully for task %s", task.TaskID)
-		writeLog(task.LogPath, "[SUCCESS] Deployment completed successfully")
-	}
-
-	// Rotate log file
-	if err := rotateLog(task.LogPath); err != nil {
-		log.Printf("Failed to rotate log file: %v", err)
-	}
-
-	// Remove task file after processing
-	os.Remove(taskFile)
-}
-
-func executeDeployment(task DeploymentTask) error {
+func ExecuteDeployment(task DeploymentTask) error {
 	// Open log file (truncate to create new for this deployment)
 	logFilePath := filepath.Join(task.LogPath, "deployment.log")
 	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -146,7 +85,7 @@ func executeDeployment(task DeploymentTask) error {
 	cmd := exec.Command("bash", task.DeploymentScriptPath)
 	cmd.Dir = task.ProjectPath
 
-	// Set environment variables for zero downtime deployment
+	// Set environment variables
 	cmd.Env = append(os.Environ(),
 		"DEPLOYER_TASK_ID="+task.TaskID,
 		"DEPLOYER_PROJECT_PATH="+task.ProjectPath,
@@ -201,12 +140,9 @@ func readAndLogOutput(pipe io.ReadCloser, logFile *os.File, prefix string, wg *s
 		timestamp := time.Now().Format("2006-01-02 15:04:05")
 		logEntry := fmt.Sprintf("[%s] [%s] %s\n", timestamp, prefix, line)
 
-		// Write to log file (non-blocking, file is opened in append mode)
 		if _, err := logFile.WriteString(logEntry); err != nil {
 			log.Printf("Failed to write to log file: %v", err)
 		}
-
-		// Also flush to ensure data is written immediately
 		logFile.Sync()
 	}
 }
@@ -218,7 +154,7 @@ func writeLogEntry(logFile *os.File, message string) {
 	logFile.Sync()
 }
 
-func writeLog(logPath string, message string) {
+func WriteLog(logPath string, message string) {
 	logFilePath := filepath.Join(logPath, "deployment.log")
 	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -229,9 +165,12 @@ func writeLog(logPath string, message string) {
 	writeLogEntry(logFile, message)
 }
 
-func rotateLog(logDir string) error {
+func RotateLog(logDir string) error {
 	activeLog := filepath.Join(logDir, "deployment.log")
 	timestamp := time.Now().Format("20060102_150405")
 	newLog := filepath.Join(logDir, fmt.Sprintf("deployment_%s.log", timestamp))
+	if _, err := os.Stat(activeLog); os.IsNotExist(err) {
+		return nil
+	}
 	return os.Rename(activeLog, newLog)
 }
