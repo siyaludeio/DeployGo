@@ -1,0 +1,26 @@
+[Unit]
+Description=Self Deployer Service
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/deployer
+ExecStart=/opt/deployer/self-deployer
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables
+# Change PORT to use a custom port (default: 8080)
+Environment="PORT=8080"
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
